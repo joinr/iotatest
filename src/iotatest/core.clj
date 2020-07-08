@@ -5,7 +5,28 @@
             [criterium.core :as c]
             [tech.v2.datatype :as dtype])
   (:import [it.unimi.dsi.fastutil.longs LongArrayList]
-           [tech.v2.datatype ObjectReader]))
+           [tech.v2.datatype ObjectReader]
+           [com.univocity.parsers.common AbstractParser AbstractWriter]
+           [com.univocity.parsers.csv CsvParserSettings CsvParser]
+           [com.univocity.parsers.tsv TsvParser TsvParserSettings]))
+
+(defn ->parser [& {:keys [delimiter indices]
+                   :or {delimiter ","}}]
+  (let [settings (-> (case delimiter
+                       ("," \,) (CsvParserSettings.)
+                       (TsvParserSettings.))
+                     (as-> settings
+                         (if (seq indices)
+                           (doto settings
+                             (.selectIndexes
+                              (into-array Integer (map int indices))))
+                           settings)))
+        ^AbstractParser
+        parser   (if (instance? TsvParserSettings settings)
+                   (TsvParser. settings)
+                   (CsvParser. settings))]
+    (fn [^String line]
+      (.parseLine parser line))))
 
 ;;can I have a function that takes an iota vector,
 ;;and wraps a lazy string?
@@ -115,6 +136,37 @@
            (.read this idx) not-found))
        ))))
 
+(defn univocity-text-columns
+  (^ObjectReader [columns backing] (univocity-text-columns "\t" columns backing))
+  (^ObjectReader [delimiter columns ^iota.FileVector backing]
+   (let [col-count      (count columns)
+         bound          (count backing)
+         cursor         (atom {:idx -1})
+         parsef          (->parser :delimiter delimiter :indices columns)
+         load-row!      (fn [idx]
+                          (let [v (.deref ^clojure.lang.Atom cursor)]
+                            (if (== ^long (v :idx) ^long idx)
+                              v
+                              (let [line (nth backing idx)]
+                                (reset! cursor {:idx idx
+                                                :line line
+                                                :row  (parsef line)})))))]
+     (reify ObjectReader
+       (lsize [rdr] col-count)
+       (read [rdr col-idx]
+         (dtype/object-reader
+          bound
+          (fn [^long idx]
+            (let [state (load-row! idx)
+                  ^objects row   (state :row)]
+              (aget row col-idx)))))
+       clojure.lang.Indexed
+       (nth [this idx] (.read this idx))
+       (nth [this idx not-found]
+         (if (and (not (neg? idx))
+                  (<= idx bound))
+           (.read this idx) not-found))
+       ))))
 
 
 
@@ -123,6 +175,7 @@
   (def bigv (iota/vec "../../sampledata.txt"))
   (def text-cols  (text-columns [0 9] bigv))
   (def text-cols-less  (indexless-text-columns [0 9] bigv))
+  (def univocity-text-cols (univocity-text-columns [0 9] bigv))
   (def big-ds (ds/->dataset "../../sampledata.txt"))
 
   (mm/measure big-ds)
@@ -137,6 +190,9 @@
 
   ;;just a thin facade around iota, with some row caching.
   (mm/measure text-cols-less)
+  ;;"1.8 MB"
+
+  (mm/measure univocity-text-cols)
   ;;"1.8 MB"
 
   (->>  [(big-ds "DemandGroup")
@@ -164,6 +220,16 @@
   ;;Evaluation count : 9556044 in 6 samples of 1592674 calls.
   ;;Execution time mean : 64.704866 ns
 
+  ;;univocity parser actually does very well, only 2x slower.
+  (let [col (second univocity-text-cols)]
+    (c/quick-bench (nth col 100000)))
+  ;Evaluation count : 11119260 in 6 samples of 1853210 calls.
+  ;;Execution time mean : 41.348901 ns
 
-
+  (def metadata (iota/vec "metadata.csv"))
+  ;(def mtext-cols  (text-columns [0 9] metadata))
+  ;(def mtext-cols-less  (indexless-text-columns [0 9] metadata))
+  (def munivocity-text-cols (univocity-text-columns "," [0 9] metadata))
+  ;;doesn't load....
+  (def m-ds (ds/->dataset "metadata.csv"))
   )
